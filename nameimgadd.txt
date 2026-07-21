@@ -1,0 +1,213 @@
+import streamlit as st
+import pandas as pd
+from PIL import Image
+from openai import OpenAI
+import base64
+import os
+
+# ၁။ Streamlit Page Setting နှင့် Background Layout
+st.set_page_config(page_title="Pesticide & Medicine Verifier", page_icon="🌾", layout="centered")
+
+# --- Background Image ထည့်ခြင်း ---
+bg_img_url = "https://www.pixelstalk.net/wp-content/uploads/image12/Forest-green-2K-QHD-wallpaper-with-a-faint-elegant-leaf-motif-subtly-integrated-into-the-design.jpg"
+import streamlit as st
+
+# ၁။ သင့်ရဲ့ မူလ Page Config
+st.set_page_config(page_title="Pesticide & Medicine Verifier", page_icon="🌾", layout="centered")
+
+# ၂။ ခေါင်းစဉ်ကို သေးပြီး Center ချရန်အတွက် CSS ထည့်ခြင်း
+st.markdown(
+    f"""
+    <style>
+    /* CSS ထဲမှာ မူလရှိပြီးသား `.stApp` ရဲ့ style တွေအောက်မှာ ဒါလေးကို ထည့်ပေးပါ */
+    .custom-title {{
+        text-align: center !important;   /* အလယ်ဗဟိုသို့ ပို့ရန် */
+        font-size: 32px !important;       /* စာလုံးအရွယ်အစားကို သင့်တော်ရုံ လျှော့ချရန် */
+        font-weight: bold !important;
+        color: #31333F !important;        /* စာလုံးအရောင် (အမည်းရောင်/မီးခိုးရင့်) */
+        line-height: 1.3 !important;
+        margin-bottom: 25px !important;
+    }}
+    
+    
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ၃။ မူလ st.title("🌾 ပိုးသတ်ဆေး ခွင့်ပြုချက် စစ်ဆေးရေး စနစ်") နေရာမှာ အောက်ပါအတိုင်း အစားထိုးပါ
+st.markdown('<div class="custom-title">🌾 ပိုးသတ်ဆေး ခွင့်ပြုချက် စစ်ဆေးရေး စနစ်</div>', unsafe_allow_html=True)
+
+# --- ၎င်းနောက်မှ သင်၏ Tabs (ဆေးအမည်ရှာရန်၊ ဆေးဘူးပုံတင်စစ်ရန်) Code များကို ဆက်လက်ရေးသားပါ ---
+
+# ၂။ Data Load လုပ်ခြင်း (Function)
+# 💡 st.cache_data ရဲ့ hash_funcs သို့မဟုတ် ညွှန်ကြားချက်အရ ဖိုင်ပြောင်းလဲမှုကို သိနိုင်ရန် cache ကို တိုက်ရိုက်မသုံးဘဲ သို့မဟုတ် ပြန်ဖတ်နိုင်အောင် လုပ်ရပါမယ်။
+def load_data(csv_path="final.csv"):
+    if not os.path.exists(csv_path):
+        # ဖိုင်မရှိသေးရင် ကော်လံအသစ်တွေနဲ့ ဆောက်ပေးမယ်
+        df = pd.DataFrame(columns=['trade_name', 'active_ingredient', 'company', 'Distributor', 'registration_number', 'status'])
+        df.to_csv(csv_path, index=False)
+        return df
+        
+    encodings = ['utf-8', 'latin1', 'cp1252', 'utf-8-sig']
+    for encoding in encodings:
+        try:
+            df = pd.read_csv(csv_path, encoding=encoding)
+            df['trade_name_clean'] = df['trade_name'].astype(str).str.strip().str.lower()
+            df['active_clean'] = df['active_ingredient'].astype(str).str.strip().str.lower()
+            df['reg_clean'] = df['registration_number'].astype(str).str.strip().str.lower()
+            return df
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("ဖိုင်ကို ဖတ်လို့မရပါ။ CSV ရဲ့ Encoding ကို စစ်ဆေးပေးပါ။")
+
+df = load_data()
+
+# --- API KEY & OpenRouter Client Setup ---
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
+client = None
+if OPENROUTER_API_KEY:
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+
+# ဓာတ်ပုံထဲက နာမည်ကို OpenRouter နဲ့ ဖတ်မယ့် Function
+def extract_medicine_name(pil_image, uploaded_file):
+    if not client:
+        st.error("🔑 Error: `OPENROUTER_API_KEY` မရှိပါ။")
+        return None
+    try:
+        uploaded_file.seek(0)
+        image_bytes = uploaded_file.read()
+        prompt = (
+            "Identify the main chemical name, active ingredient, or trade name of the pesticide/medicine shown in this image. "
+            "Return ONLY the extracted name in plain text. No extra words, no punctuation."
+        )
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+        response = client.chat.completions.create(
+            model="google/gemini-2.5-flash", 
+            max_tokens=4000, 
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:{uploaded_file.type};base64,{base64_image}"}}]}]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        st.error(f"OpenRouter API Error: {e}")
+        return None
+
+# ရလာတဲ့ စာသားကို Dataset ထဲမှာ လိုက်ရှာမယ့် Function
+def check_status_logic(search_text, dataframe):
+    query_clean = search_text.strip().lower()
+    result = dataframe[(dataframe['trade_name_clean'] == query_clean) | (dataframe['active_clean'] == query_clean) | (dataframe['reg_clean'] == query_clean)]
+    if result.empty:
+        result = dataframe[dataframe['trade_name_clean'].str.contains(query_clean, na=False) | dataframe['active_clean'].str.contains(query_clean, na=False) | dataframe['reg_clean'].str.contains(query_clean, na=False)]
+    return result
+
+
+# ==================== NAVIGATION SIDEBAR ====================
+st.sidebar.title("📌 မီနူး ရွေးချယ်ရန်")
+page = st.sidebar.radio("သွားလိုသည့် စာမျက်နှာ:", ["🔍 စစ်ဆေးရေး Main Page", "➕ ဆေးအသစ် ထည့်သွင်းရန်"])
+
+
+# ==================== PAGE 1: MAIN CHECKER PAGE ====================
+if page == "🔍 စစ်ဆေးရေး Main Page":
+    #st.title("🌾 ပိုးသတ်ဆေး ခွင့်ပြုချက် စစ်ဆေးရေး စနစ်")
+    
+    tab1, tab2 = st.tabs(["🔍 ဆေးအမည် ရိုက်ရှာရန်", "📸 ဆေးဘူးပုံ တင်စစ်ရန်"])
+
+    # Tab 1: စာသားရိုက်ပြီး ရှာဖွေခြင်း
+    with tab1:
+        st.write("စိုက်ပျိုးရေးဌာနတွင် မှတ်ပုံတင်ထားခြင်း ရှိ/မရှိ စစ်ဆေးရန် ဆေးအမည်ကို ရိုက်ထည့်ပါ။")
+        search_query = st.text_input("ပိုးသတ်ဆေးအမည် (Trade Name သို့မဟုတ် Active Ingredient သို့မဟုတ် Reg Number):")
+
+        if search_query:
+            res_df = check_status_logic(search_query, df)
+            if not res_df.empty:
+                row = res_df.iloc[0]
+                st.subheader(f"Result - {row['trade_name']}")
+                status = str(row['status']).strip()
+                if status.lower() == "approved":
+                    st.success("✅ APPROVED (အသုံးပြုရန် ခွင့်ပြုထားသော ဆေးဖြစ်ပါသည်)")
+                elif status.lower() == "banned":
+                    st.error("❌ BANNED (ပိတ်ပင်တားမြစ်ထားသော ဆေးဖြစ်ပါသည်)")
+                else:
+                    st.warning(f"⚠️ STATUS: {status.upper()}")
+                st.write(f"**ပါဝင်ပစ္စည်း:** {row.get('active_ingredient', '-')}")
+                st.write(f"**တင်သွင်းသည့်ကုမ္ပဏီ:** {row.get('company', '-')}")
+                st.write(f"**ဖြန့်ဝေသည့်ကုမ္ပဏီ:** {row.get('Distributor', '-')}")
+                st.write(f"**မှတ်ပုံတင်နံပါတ်:** {row.get('registration_number', '-')}")
+            else:
+                st.warning("⚠️ ရှာမတွေ့ပါ။ စိုက်ပျိုးရေးဌာနတွင် မှတ်ပုံတင်ထားခြင်း မရှိသေးပါ။")
+
+    # Tab 2: ဓာတ်ပုံတင်ပြီး စစ်ဆေးခြင်း
+    with tab2:
+        st.write("ဆေးဘူး သို့မဟုတ် စိုက်ပျိုးရေးဆေးပုံကို Upload တင်ပြီး စစ်ဆေးပါ။")
+        uploaded_file = st.file_uploader("ကြိုက်နှစ်သက်ရာ ဆေးဘူးပုံကို ရွေးချယ်တင်ပါ...", type=["jpg", "jpeg", "png"])
+
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            st.image(image, caption="တင်လိုက်သော ဆေးဘူးပုံ", use_container_width=True)
+            
+            if st.button("စစ်ဆေးမည် (Verify Now)"):
+                with st.spinner("ဆေးအမည်ကို ဓာတ်ပုံထဲမှ ဖတ်နေပါတယ်..."):
+                    detected_name = extract_medicine_name(image, uploaded_file)
+                    if detected_name:
+                        st.info(f"🔍 **ဖတ်မိသော အမည်/စာသား:** {detected_name}")
+                        st.divider()
+                        res_df = check_status_logic(detected_name, df)
+                        if not res_df.empty:
+                            row = res_df.iloc[0]
+                            st.subheader("📊 ရလဒ်အဖြေ (Result)")
+                            st.write(f"**ဆေးအမည် (Trade Name):** {row['trade_name']}")
+                            st.write(f"**ပါဝင်ပစ္စည်း (Active Ingredient):** {row.get('active_ingredient', '-')}")
+                            status = str(row['status']).strip()
+                            if status.lower() == "approved":
+                                st.success("✅ APPROVED (အသုံးပြုရန် ခွင့်ပြုထားသော ဆေးဖြစ်ပါသည်)")
+                            elif status.lower() == "banned":
+                                st.error("❌ BANNED (ပိတ်ပင်တားမြစ်ထားသော ဆေးဖြစ်ပါသည်)")
+                        else:
+                            st.warning(f"⚠️ NOT FOUND: '{detected_name}' ကို Dataset ထဲမှာ ရှာမတွေ့ပါ။")
+
+
+# ==================== PAGE 2: ADD NEW PESTICIDE PAGE ====================
+elif page == "➕ ဆေးအသစ် ထည့်သွင်းရန်":
+    st.title("➕ ပိုးသတ်ဆေးအချက်အလက်အသစ် ထည့်သွင်းခြင်း")
+    st.write("Dataset (`final.csv`) ထဲသို့ ဆေးအသစ်များ ဖြည့်စွက်သိမ်းဆည်းရန် Form ကို ဖြည့်ပါ။")
+    
+    # Form input ယူခြင်း
+    with st.form("add_pesticide_form", clear_on_submit=True):
+        trade_name = st.text_input("ဆေးအမည် (Trade Name) *")
+        active_ingredient = st.text_input("ပါဝင်ပစ္စည်း (Active Ingredient) *")
+        company = st.text_input("တင်သွင်းသည့် ကုမ္ပဏီ (Company)")
+        distributor = st.text_input("ဖြန့်ဝေသည့် ကုမ္ပဏီ (Distributor)")
+        reg_number = st.text_input("မှတ်ပုံတင်နံပါတ် (Registration Number) *")
+        status = st.selectbox("ခွင့်ပြုချက် အခြေအနေ (Status) *", ["Approved", "Banned", "Pending"])
+        
+        submit_button = st.form_submit_button("💾 အချက်အလက် သိမ်းဆည်းမည်")
+        
+        if submit_button:
+            # မဖြစ်မနေထည့်ရမယ့် အကွက်တွေ စစ်ဆေးခြင်း
+            if not trade_name or not active_ingredient or not reg_number:
+                st.error("⚠️ ကျေးဇူးပြု၍ ကြယ်ပွင့် (*) ပြထားသော နေရာများကို မဖြစ်မနေ ဖြည့်စွက်ပေးပါ။")
+            else:
+                # Data အသစ်ကို Dictionary အဖြစ် တည်ဆောက်
+                new_data = {
+                    'trade_name': [trade_name.strip()],
+                    'active_ingredient': [active_ingredient.strip()],
+                    'company': [company.strip() if company else "-"],
+                    'Distributor': [distributor.strip() if distributor else "-"],
+                    'registration_number': [reg_number.strip()],
+                    'status': [status]
+                }
+                new_df = pd.DataFrame(new_data)
+                
+                try:
+                    # မူရင်း CSV ဖိုင်ထဲသို့ နောက်ဆုံးကနေ သွားတွဲ (Append) လုပ်ပြီး သိမ်းခြင်း
+                    new_df.to_csv("final.csv", mode='a', header=False, index=False, encoding='utf-8')
+                    st.success(f"🎉 '{trade_name}' ဆေးအချက်အလက်ကို `final.csv` ထဲသို့ အောင်မြင်စွာ ထည့်သွင်းပြီးပါပြီ။")
+                    
+                    # နောက်တစ်ကြိမ် ဖတ်ရင် Data အသစ်ပါလာအောင် df ကို refresh လုပ်ပေးခြင်း
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"ဖိုင်သိမ်းဆည်းရာတွင် အမှားအယွင်းရှိခဲ့သည်: {e}")
+
+    # လက်ရှိရှိနေတဲ့ Data အရေအတွက်ကို လှမ်းပြပေးခြင်း (Optional)
+    st.divider()
+    st.write(f" Dataset ထဲတွင် စုစုပေါင်း ပိုးသတ်ဆေး **{len(df)}** မျိုး မှတ်ပုံတင်ထားပြီး ဖြစ်သည်။")
